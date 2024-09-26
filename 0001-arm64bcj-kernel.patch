@@ -1,17 +1,17 @@
-From 5fa33fb94cce4ff084b0cf8302f3d9fc975cb246 Mon Sep 17 00:00:00 2001
+From b43f16a4dc2c6994c8152139d903011c9caac095 Mon Sep 17 00:00:00 2001
 From: MercyHeart <2384268568@qq.com>
-Date: Thu, 26 Sep 2024 22:55:36 +0200
-Subject: [PATCH] add arm bcj decode to mount erofsImg with arm64bcj
+Date: Thu, 26 Sep 2024 23:25:09 +0200
+Subject: [PATCH] arm64bcj kernel
 
 ---
  fs/erofs/Makefile   |   2 +-
- fs/erofs/bcj.c      | 257 ++++++++++++++++++++++++++++++++++++++++++++
+ fs/erofs/bcj.c      | 255 ++++++++++++++++++++++++++++++++++++++++++++
  fs/erofs/bcj.h      |  25 +++++
  fs/erofs/erofs_fs.h |   3 +-
  fs/erofs/internal.h |   1 +
  fs/erofs/super.c    |   1 +
  fs/erofs/zdata.c    |  41 +++++++
- 7 files changed, 328 insertions(+), 2 deletions(-)
+ 7 files changed, 326 insertions(+), 2 deletions(-)
  create mode 100644 fs/erofs/bcj.c
  create mode 100644 fs/erofs/bcj.h
 
@@ -30,11 +30,11 @@ index 097d672e6..dad94238f 100644
  erofs-$(CONFIG_EROFS_FS_ZIP_LZMA) += decompressor_lzma.o
 diff --git a/fs/erofs/bcj.c b/fs/erofs/bcj.c
 new file mode 100644
-index 000000000..5ce50bc49
+index 000000000..1d222466b
 --- /dev/null
 +++ b/fs/erofs/bcj.c
-@@ -0,0 +1,257 @@
-+/* SPDX-License-Identifier: GPL-2.0+ OR Apache-2.0 */
+@@ -0,0 +1,255 @@
++// SPDX-License-Identifier: GPL-2.0+ OR Apache-2.0
 +/*
 + * Copyright (C) 2024 HUAWEI, Inc.
 + *             http://www.huawei.com/
@@ -47,7 +47,7 @@ index 000000000..5ce50bc49
 +#include "bcj.h"
 +#define Test86MSByte(b) ((b) == 0 || (b) == 0xFF)
 +
-+struct lzma_simple_x86{
++struct lzma_simple_x86 {
 +	uint32_t prev_mask;
 +	uint32_t prev_pos;
 +};
@@ -200,25 +200,23 @@ index 000000000..5ce50bc49
 +#endif
 +
 +// 读取32位小端整数
-+static inline uint32_t read32le(const uint8_t *buf) 
++static inline uint32_t read32le(const uint8_t *buf)
 +{
-+    uint32_t num;
++	uint32_t num;
 +
-+    memcpy(&num, buf, sizeof(num));
++	memcpy(&num, buf, sizeof(num));
 +    // 如果系统是大端序，则进行字节交换
-+    if (!IS_LITTLE_ENDIAN)
++	if (!IS_LITTLE_ENDIAN)
 +		num = bswap32(num);
-+    
-+    return num;
++	return num;
 +}
 +
 +// 写入32位小端整数
-+static inline void write32le(uint8_t *buf, uint32_t num) 
++static inline void write32le(uint8_t *buf, uint32_t num)
 +{
-+    if (!IS_LITTLE_ENDIAN)
++	if (!IS_LITTLE_ENDIAN)
 +		num = bswap32(num);
-+    
-+    memcpy(buf, &num, sizeof(num));
++	memcpy(buf, &num, sizeof(num));
 +}
 +
 +static size_t arm64_code(uint32_t now_pos, bool is_encoder,
@@ -361,7 +359,7 @@ index 6cb5c8916..d0990e294 100644
  	super_set_uuid(sb, (void *)dsb->uuid, sizeof(dsb->uuid));
  
 diff --git a/fs/erofs/zdata.c b/fs/erofs/zdata.c
-index 424f656cd..3afe1338d 100644
+index 424f656cd..df353a5e3 100644
 --- a/fs/erofs/zdata.c
 +++ b/fs/erofs/zdata.c
 @@ -9,6 +9,8 @@
@@ -401,9 +399,8 @@ index 424f656cd..3afe1338d 100644
 +	if (pcl->pclustersize != pcl->length) {
 +		uint8_t *buf = (uint8_t *)kmap_local_page(page);
 +
-+		if (!buf) {
++		if (!buf)
 +			return -1;
-+		}
 +		uint32_t startpos;
 +
 +		if (nowpage == 0) {
@@ -416,13 +413,14 @@ index 424f656cd..3afe1338d 100644
 +				bcj_code(buf, startpos, PAGE_SIZE, bcj_flag, false);
 +			else
 +				bcj_code(buf, startpos,
-+					(pcl->pageofs_out + pcl->length)%PAGE_SIZE, bcj_flag, false);
++					(pcl->pageofs_out + pcl->length)%PAGE_SIZE,
++					bcj_flag, false);
 +		} else {
 +			startpos = pcl->filepos + nowpage*PAGE_SIZE - pcl->pageofs_out;
 +			bcj_code(buf, startpos, PAGE_SIZE, bcj_flag, false);
 +		}
 +		kunmap_local(buf);
-+	}	
++	}
 +	return 0;
 +}
 +
