@@ -3,6 +3,8 @@ From: MercyHeart <2384268568@qq.com>
 Date: Thu, 26 Sep 2024 23:25:09 +0200
 Subject: [PATCH] arm64bcj kernel
 
+This patch adds support for BCJ decompression with the arm64 bcj.
+
 ---
  fs/erofs/Makefile   |   2 +-
  fs/erofs/bcj.c      | 255 ++++++++++++++++++++++++++++++++++++++++++++
@@ -15,6 +17,7 @@ Subject: [PATCH] arm64bcj kernel
  create mode 100644 fs/erofs/bcj.c
  create mode 100644 fs/erofs/bcj.h
 
+Signed-off-by: MercyHeart <2384268568@qq.com>
 diff --git a/fs/erofs/Makefile b/fs/erofs/Makefile
 index 097d672e6..dad94238f 100644
 --- a/fs/erofs/Makefile
