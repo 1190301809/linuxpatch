@@ -1,0 +1,770 @@
+From a7a2ec25e8c6775c3fa06e7a147e0900017a2fce Mon Sep 17 00:00:00 2001
+From: MercyHeart <mikukon1@outlook.com>
+Date: Thu, 26 Sep 2024 15:51:06 +0200
+Subject: [PATCH] arm64bcj utils
+
+---
+ configure.ac             |  53 ++++----
+ fsck/main.c              |   5 +
+ include/erofs/bcj.h      |  24 ++++
+ include/erofs/config.h   |   1 +
+ include/erofs/internal.h |   1 +
+ include/erofs_fs.h       |   3 +-
+ lib/Makefile.am          |   3 +-
+ lib/bcj.c                | 284 +++++++++++++++++++++++++++++++++++++++
+ lib/compress.c           |  64 +++++++--
+ lib/data.c               |   2 +-
+ lib/decompress.c         |   2 +-
+ lib/super.c              |   2 +
+ mkfs/Makefile.am         |   2 +-
+ mkfs/main.c              |  21 +++
+ 14 files changed, 430 insertions(+), 37 deletions(-)
+ create mode 100644 include/erofs/bcj.h
+ create mode 100644 lib/bcj.c
+
+diff --git a/configure.ac b/configure.ac
+index 945e254..905bee9 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -127,8 +127,8 @@ AC_ARG_ENABLE(lz4,
+    [enable_lz4="$enableval"], [enable_lz4="yes"])
+ 
+ AC_ARG_ENABLE(lzma,
+-   [AS_HELP_STRING([--disable-lzma], [disable LZMA compression support @<:@default=auto@:>@])],
+-   [enable_lzma="$enableval"])
++   [AS_HELP_STRING([--enable-lzma], [enable LZMA compression support @<:@default=no@:>@])],
++   [enable_lzma="$enableval"], [enable_lzma="no"])
+ 
+ AC_ARG_WITH(zlib,
+    [AS_HELP_STRING([--without-zlib],
+@@ -184,6 +184,14 @@ AC_ARG_WITH(lz4-libdir,
+ AC_ARG_VAR([LZ4_CFLAGS], [C compiler flags for lz4])
+ AC_ARG_VAR([LZ4_LIBS], [linker flags for lz4])
+ 
++AC_ARG_WITH(liblzma-incdir,
++   [AS_HELP_STRING([--with-liblzma-incdir=DIR], [liblzma include directory])], [
++   EROFS_UTILS_PARSE_DIRECTORY(["$withval"],[withval])])
++
++AC_ARG_WITH(liblzma-libdir,
++   [AS_HELP_STRING([--with-liblzma-libdir=DIR], [liblzma lib directory])], [
++   EROFS_UTILS_PARSE_DIRECTORY(["$withval"],[withval])])
++
+ # Checks for header files.
+ AC_CHECK_HEADERS(m4_flatten([
+ 	dirent.h
+@@ -426,31 +434,30 @@ if test "x$enable_lz4" = "xyes"; then
+   CPPFLAGS=${saved_CPPFLAGS}
+ fi
+ 
+-# Configure liblzma
+-have_liblzma="no"
+-AS_IF([test "x$enable_lzma" != "xno"], [
++if test "x$enable_lzma" = "xyes"; then
+   saved_CPPFLAGS=${CPPFLAGS}
+-  PKG_CHECK_MODULES([liblzma], [liblzma], [
+-    # Paranoia: don't trust the result reported by pkgconfig before trying out
++  test -z "${with_liblzma_incdir}" ||
++    CPPFLAGS="-I$with_liblzma_incdir $CPPFLAGS"
++  AC_CHECK_HEADERS([lzma.h],[have_lzmah="yes"], [])
++
++  if test "x${have_lzmah}" = "xyes" ; then
+     saved_LIBS="$LIBS"
+-    saved_CPPFLAGS=${CPPFLAGS}
+-    CPPFLAGS="${liblzma_CFLAGS} ${CPPFLAGS}"
+-    LIBS="${liblzma_LIBS} $LIBS"
+-    AC_CHECK_HEADERS([lzma.h],[
+-      AC_CHECK_LIB(lzma, lzma_microlzma_encoder, [
+-        AC_CHECK_DECL(lzma_microlzma_encoder, [have_liblzma="yes"],
+-          [], [[
++    saved_LDFLAGS="$LDFLAGS"
++
++    test -z "${with_liblzma_libdir}" ||
++      LDFLAGS="-L$with_liblzma_libdir ${LDFLAGS}"
++    AC_CHECK_LIB(lzma, lzma_microlzma_encoder, [],
++      [AC_MSG_ERROR([Cannot find proper liblzma])])
++
++    AC_CHECK_DECL(lzma_microlzma_encoder, [have_liblzma="yes"],
++      [AC_MSG_ERROR([Cannot find proper liblzma])], [[
+ #include <lzma.h>
+-        ]])
+-      ])
+-    ])
++    ]])
++    LDFLAGS="${saved_LDFLAGS}"
+     LIBS="${saved_LIBS}"
+-    CPPFLAGS="${saved_CPPFLAGS}"
+-  ], [[]])
+-  AS_IF([test "x$enable_lzma" = "xyes" -a "x$have_liblzma" != "xyes"], [
+-    AC_MSG_ERROR([Cannot find a proper liblzma version])
+-  ])
+-])
++  fi
++  CPPFLAGS="${saved_CPPFLAGS}"
++fi
+ 
+ # Configure zlib
+ have_zlib="no"
+diff --git a/fsck/main.c b/fsck/main.c
+index 28f1e7e..6e0767b 100644
+--- a/fsck/main.c
++++ b/fsck/main.c
+@@ -13,6 +13,7 @@
+ #include "erofs/compress.h"
+ #include "erofs/decompress.h"
+ #include "erofs/dir.h"
++#include "erofs/bcj.h"
+ #include "../lib/compressor.h"
+ 
+ static int erofsfsck_check_inode(erofs_nid_t pnid, erofs_nid_t nid);
+@@ -519,6 +520,10 @@ static int erofs_verify_inode_data(struct erofs_inode *inode, int outfd)
+ 			}
+ 			ret = z_erofs_read_one_data(inode, &map, raw, buffer,
+ 						    0, map.m_llen, false);
++			if(g_sbi.bcj_flag && map.m_plen != map.m_llen){
++				bcj_code((uint8_t *)buffer,(uint32_t)map.m_la,(size_t)map.m_llen,g_sbi.bcj_flag,false);
++			}
++
+ 			if (ret)
+ 				goto out;
+ 
+diff --git a/include/erofs/bcj.h b/include/erofs/bcj.h
+new file mode 100644
+index 0000000..2b20179
+--- /dev/null
++++ b/include/erofs/bcj.h
+@@ -0,0 +1,24 @@
++/* SPDX-License-Identifier: GPL-2.0+ OR Apache-2.0 */
++/*
++ * Copyright (C) 2024 HUAWEI, Inc.
++ *             http://www.huawei.com/
++ * Created by MercyHeart <2384268568@qq.com>
++ * Created by Feynman G <gxnorz@gmail.com>
++ */
++#ifndef __EROFS_BCJ_H
++#define __EROFS_BCJ_H
++
++#ifdef __cplusplus
++extern "C"
++{
++#endif
++
++int erofs_bcj_filedecode(char* filepath, int bcj_type);
++int erofs_bcj_fileread(int fd, void* buf,size_t nbytes, off_t offset);
++int bcj_code(uint8_t* buf,uint32_t startpos,size_t size,int bcj_type,bool is_encode);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif
+diff --git a/include/erofs/config.h b/include/erofs/config.h
+index ae366c1..4bb4b79 100644
+--- a/include/erofs/config.h
++++ b/include/erofs/config.h
+@@ -94,6 +94,7 @@ struct erofs_configure {
+ 	char *fs_config_file;
+ 	char *block_list_file;
+ #endif
++	int c_bcj_flag;
+ };
+ 
+ extern struct erofs_configure cfg;
+diff --git a/include/erofs/internal.h b/include/erofs/internal.h
+index 2edc1b4..c153539 100644
+--- a/include/erofs/internal.h
++++ b/include/erofs/internal.h
+@@ -133,6 +133,7 @@ struct erofs_sb_info {
+ 	struct list_head list;
+ 
+ 	u64 saved_by_deduplication;
++	u8 bcj_flag;
+ 
+ #ifdef EROFS_MT_ENABLED
+ 	pthread_t dfops_worker;
+diff --git a/include/erofs_fs.h b/include/erofs_fs.h
+index fc21915..9808e12 100644
+--- a/include/erofs_fs.h
++++ b/include/erofs_fs.h
+@@ -84,7 +84,8 @@ struct erofs_super_block {
+ 	__le32 xattr_prefix_start;	/* start of long xattr prefixes */
+ 	__le64 packed_nid;	/* nid of the special packed inode */
+ 	__u8 xattr_filter_reserved; /* reserved for xattr name filter */
+-	__u8 reserved2[23];
++	__u8 bcj_flag;
++	__u8 reserved2[22];
+ };
+ 
+ /*
+diff --git a/lib/Makefile.am b/lib/Makefile.am
+index 2cb4cab..e0291ea 100644
+--- a/lib/Makefile.am
++++ b/lib/Makefile.am
+@@ -27,6 +27,7 @@ noinst_HEADERS = $(top_srcdir)/include/erofs_fs.h \
+       $(top_srcdir)/include/erofs/fragments.h \
+       $(top_srcdir)/include/erofs/rebuild.h \
+       $(top_srcdir)/lib/liberofs_private.h \
++      $(top_srcdir)/include/erofs/bcj.h \
+       $(top_srcdir)/lib/xxhash.h
+ 
+ noinst_HEADERS += compressor.h
+@@ -34,7 +35,7 @@ liberofs_la_SOURCES = config.c io.c cache.c super.c inode.c xattr.c exclude.c \
+ 		      namei.c data.c compress.c compressor.c zmap.c decompress.c \
+ 		      compress_hints.c hashmap.c sha256.c blobchunk.c dir.c \
+ 		      fragments.c dedupe.c uuid_unparse.c uuid.c tar.c \
+-		      block_list.c xxhash.c rebuild.c diskbuf.c
++		      block_list.c xxhash.c rebuild.c diskbuf.c bcj.c
+ 
+ liberofs_la_CFLAGS = -Wall ${libuuid_CFLAGS} -I$(top_srcdir)/include
+ if ENABLE_LZ4
+diff --git a/lib/bcj.c b/lib/bcj.c
+new file mode 100644
+index 0000000..f3ea84e
+--- /dev/null
++++ b/lib/bcj.c
+@@ -0,0 +1,284 @@
++#include <string.h>
++#include <sys/stat.h>
++#include <unistd.h>
++#include <fcntl.h>
++#include <stdlib.h>
++#include "erofs/print.h"
++#include "erofs/bcj.h"
++
++#define Test86MSByte(b) ((b) == 0 || (b) == 0xFF)
++
++typedef struct {
++	uint32_t prev_mask;
++	uint32_t prev_pos;
++} lzma_simple_x86;
++
++static size_t
++x86_code(void *simple_ptr, uint32_t now_pos, bool is_encoder,
++		uint8_t *buffer, size_t size)
++{
++	static const bool MASK_TO_ALLOWED_STATUS[8]
++		= { true, true, true, false, true, false, false, false };
++
++	static const uint32_t MASK_TO_BIT_NUMBER[8]
++			= { 0, 1, 2, 2, 3, 3, 3, 3 };
++
++	lzma_simple_x86 *simple = simple_ptr;
++	uint32_t prev_mask = simple->prev_mask;
++	uint32_t prev_pos = simple->prev_pos;
++
++	if (size < 5)
++		return 0;
++
++	if (now_pos - prev_pos > 5)
++		prev_pos = now_pos - 5;
++
++	const size_t limit = size - 5;
++	size_t buffer_pos = 0;
++
++	while (buffer_pos <= limit) {
++		uint8_t b = buffer[buffer_pos];
++		if (b != 0xE8 && b != 0xE9) {
++			++buffer_pos;
++			continue;
++		}
++
++		const uint32_t offset = now_pos + (uint32_t)(buffer_pos)
++				- prev_pos;
++		prev_pos = now_pos + (uint32_t)(buffer_pos);
++
++		if (offset > 5) {
++			prev_mask = 0;
++		} else {
++			for (uint32_t i = 0; i < offset; ++i) {
++				prev_mask &= 0x77;
++				prev_mask <<= 1;
++			}
++		}
++
++		b = buffer[buffer_pos + 4];
++
++		if (Test86MSByte(b)
++			&& MASK_TO_ALLOWED_STATUS[(prev_mask >> 1) & 0x7]
++				&& (prev_mask >> 1) < 0x10) {
++
++			uint32_t src = ((uint32_t)(b) << 24)
++				| ((uint32_t)(buffer[buffer_pos + 3]) << 16)
++				| ((uint32_t)(buffer[buffer_pos + 2]) << 8)
++				| (buffer[buffer_pos + 1]);
++
++			uint32_t dest;
++			while (true) {
++				if (is_encoder)
++					dest = src + (now_pos + (uint32_t)(
++							buffer_pos) + 5);
++				else
++					dest = src - (now_pos + (uint32_t)(
++							buffer_pos) + 5);
++
++				if (prev_mask == 0)
++					break;
++
++				const uint32_t i = MASK_TO_BIT_NUMBER[
++						prev_mask >> 1];
++
++				b = (uint8_t)(dest >> (24 - i * 8));
++
++				if (!Test86MSByte(b))
++					break;
++
++				src = dest ^ ((1U << (32 - i * 8)) - 1);
++			}
++
++			buffer[buffer_pos + 4]
++					= (uint8_t)(~(((dest >> 24) & 1) - 1));
++			buffer[buffer_pos + 3] = (uint8_t)(dest >> 16);
++			buffer[buffer_pos + 2] = (uint8_t)(dest >> 8);
++			buffer[buffer_pos + 1] = (uint8_t)(dest);
++			buffer_pos += 5;
++			prev_mask = 0;
++
++		} else {
++			++buffer_pos;
++			prev_mask |= 1;
++			if (Test86MSByte(b))
++				prev_mask |= 0x10;
++		}
++	}
++
++	simple->prev_mask = prev_mask;
++	simple->prev_pos = prev_pos;
++
++	return buffer_pos;
++}
++
++static size_t arm_code(uint32_t now_pos, bool is_encoder,
++		uint8_t *buffer, size_t size)
++{
++	size_t i;
++	for (i = 0; i + 4 <= size; i += 4) {
++		if (buffer[i + 3] == 0xEB) {
++			uint32_t src = ((uint32_t)(buffer[i + 2]) << 16)
++					| ((uint32_t)(buffer[i + 1]) << 8)
++					| (uint32_t)(buffer[i + 0]);
++			src <<= 2;
++
++			uint32_t dest;
++			if (is_encoder)
++				dest = now_pos + (uint32_t)(i) + 8 + src;
++			else
++				dest = src - (now_pos + (uint32_t)(i) + 8);
++
++			dest >>= 2;
++			buffer[i + 2] = (dest >> 16);
++			buffer[i + 1] = (dest >> 8);
++			buffer[i + 0] = dest;
++		}
++	}
++
++	return i;
++}
++
++#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
++#define IS_LITTLE_ENDIAN 1
++#else
++#define IS_LITTLE_ENDIAN 0
++#endif
++
++#ifndef bswap32
++#define bswap32(n) (uint32_t)( \
++      (((n) & UINT32_C(0x000000FF)) << 24) | \
++      (((n) & UINT32_C(0x0000FF00)) << 8)  | \
++      (((n) & UINT32_C(0x00FF0000)) >> 8)  | \
++      (((n) & UINT32_C(0xFF000000)) >> 24) \
++    )
++#endif
++
++static inline uint32_t read32le(const uint8_t *buf) {
++    uint32_t num;
++    memcpy(&num, buf, sizeof(num));
++
++    if (!IS_LITTLE_ENDIAN) {
++        num = bswap32(num);
++    }
++    return num;
++}
++
++static inline void write32le(uint8_t *buf, uint32_t num) {
++    if (!IS_LITTLE_ENDIAN) {
++        num = bswap32(num);
++    }
++    memcpy(buf, &num, sizeof(num));
++}
++
++static size_t arm64_code(uint32_t now_pos, bool is_encoder,
++		uint8_t *buffer, size_t size)
++{
++	size_t i;
++
++#ifdef __clang__
++#	pragma clang loop vectorize(disable)
++#endif
++	for (i = 0; i + 4 <= size; i += 4) {
++		uint32_t pc = (uint32_t)(now_pos + i);
++		uint32_t instr = read32le(buffer + i);
++
++		if ((instr >> 26) == 0x25) {
++			const uint32_t src = instr;
++			instr = 0x94000000;
++
++			pc >>= 2;
++			if (!is_encoder)
++				pc = 0U - pc;
++
++			instr |= (src + pc) & 0x03FFFFFF;
++			write32le(buffer + i, instr);
++
++		} else if ((instr & 0x9F000000) == 0x90000000) {
++			const uint32_t src = ((instr >> 29) & 3)
++					| ((instr >> 3) & 0x001FFFFC);
++			if ((src + 0x00020000) & 0x001C0000)
++				continue;
++
++			instr &= 0x9000001F;
++
++			pc >>= 12;
++			if (!is_encoder)
++				pc = 0U - pc;
++
++			const uint32_t dest = src + pc;
++			instr |= (dest & 3) << 29;
++			instr |= (dest & 0x0003FFFC) << 3;
++			instr |= (0U - (dest & 0x00020000)) & 0x00E00000;
++			write32le(buffer + i, instr);
++		}
++	}
++
++	return i;
++}
++
++int bcj_code(uint8_t* buf,uint32_t startpos,size_t size,int bcj_type,bool is_encode)
++{
++	size_t processed_size = 0;
++	lzma_simple_x86 simple;
++	switch (bcj_type) {
++	case 1:
++		simple.prev_mask = 0;
++		simple.prev_pos = (uint32_t)(-5);
++		processed_size = x86_code(&simple, startpos, is_encode, buf, size);
++		break;
++	case 2:
++		processed_size = arm_code(startpos, is_encode, buf, size);
++		break;
++	case 3:
++		processed_size = arm64_code(startpos, is_encode, buf, size);
++		break;
++	default:
++		erofs_err("bad bcjcode flag");
++		break;
++	}
++	return processed_size;
++}
++
++int erofs_bcj_filedecode(char* filepath, int bcj_type)
++{
++	size_t processed_size = 0;
++	struct stat st;
++	size_t size;
++	uint8_t* buf = NULL;
++	int fd = open(filepath, O_RDWR, 0700);
++	if (fstat(fd,&st) == -1){
++		erofs_err("fail to get file size");
++		close(fd);
++		return -errno;
++	}
++
++	size = (size_t)st.st_size;
++	buf = (uint8_t *) malloc(size);
++	if(!buf){
++		erofs_err("fail to allocate memory");
++		close(fd);
++		return -errno;
++	}
++	if(read(fd, buf, size) < 0){
++		erofs_err("fail to read file ");
++		close(fd);
++		return -errno;
++	}
++
++	processed_size = bcj_code(buf,0,size,bcj_type,false);
++	return 0;
++}
++
++int erofs_bcj_fileread(int fd, void* buf,size_t nbytes, off_t offset)
++{
++	uint8_t* buffer = (uint8_t *) buf;
++	size_t processed_size = 0;
++	int ret = (offset == -1 ?
++			read(fd, buf, nbytes):
++			pread(fd, buf, nbytes, offset));
++	if (ret != nbytes)
++		return -errno;
++	processed_size = bcj_code(buffer,0,nbytes,cfg.c_bcj_flag,true);
++	return ret;
++}
+diff --git a/lib/compress.c b/lib/compress.c
+index 8655e78..800ba47 100644
+--- a/lib/compress.c
++++ b/lib/compress.c
+@@ -14,6 +14,7 @@
+ #include "erofs/print.h"
+ #include "erofs/cache.h"
+ #include "erofs/compress.h"
++#include "erofs/bcj.h"
+ #include "erofs/dedupe.h"
+ #include "compressor.h"
+ #include "erofs/block_list.h"
+@@ -82,6 +83,9 @@ struct z_erofs_compress_sctx {		/* segment context */
+ 
+ 	void *membuf;
+ 	erofs_off_t memoff;
++
++	u8* bcjdata;
++	uint32_t filepos;
+ };
+ 
+ #ifdef EROFS_MT_ENABLED
+@@ -259,6 +263,7 @@ static bool z_erofs_need_refill(struct z_erofs_compress_sctx *ctx)
+ 	memmove(ctx->queue, ctx->queue + qh_aligned, ctx->tail - qh_aligned);
+ 	ctx->tail -= qh_aligned;
+ 	ctx->head = qh_after;
++	ctx->filepos += qh_aligned;
+ 	return true;
+ }
+ 
+@@ -544,8 +549,28 @@ static int __z_erofs_compress_one(struct z_erofs_compress_sctx *ctx,
+ 	}
+ 
+ 	e->length = min(len, cfg.c_max_decompressed_extent_bytes);
+-	ret = erofs_compress_destsize(h, ctx->queue + ctx->head,
++
++	if(cfg.c_bcj_flag){
++		unsigned int temp_size = e->length;
++		ret = erofs_compress_destsize(h, ctx->bcjdata + ctx->head,
++				      &temp_size, dst, ctx->pclustersize);
++		if(cfg.c_bcj_flag == 1){//for x86
++
++		}
++		else if(cfg.c_bcj_flag == 2 || cfg.c_bcj_flag == 3){//arm and arm 64
++			while(temp_size % 4 != 0 && temp_size != e->length){
++				temp_size -= temp_size % 4;
++				ret = erofs_compress_destsize(h, ctx->bcjdata + ctx->head,
++				      &temp_size, dst, ctx->pclustersize);
++			}
++		}
++		e->length = temp_size;
++	}
++	else{
++		ret = erofs_compress_destsize(h, ctx->queue + ctx->head,
+ 				      &e->length, dst, ctx->pclustersize);
++	}
++
+ 	if (ret <= 0) {
+ 		erofs_err("failed to compress %s: %s", inode->i_srcpath,
+ 			  erofs_strerror(ret));
+@@ -600,7 +625,6 @@ frag_packing:
+ 			inode->eof_tailraw = malloc(len);
+ 			if (!inode->eof_tailraw)
+ 				return -ENOMEM;
+-
+ 			memcpy(inode->eof_tailraw, ctx->queue + ctx->head, len);
+ 			inode->eof_tailrawsize = len;
+ 		}
+@@ -628,9 +652,16 @@ frag_packing:
+ 			goto fix_dedupedfrag;
+ 		}
+ 
+-		if (may_inline && len == e->length)
+-			tryrecompress_trailing(ctx, h, ctx->queue + ctx->head,
+-					&e->length, dst, &compressedsize);
++		if (may_inline && len == e->length){
++			if(cfg.c_bcj_flag){
++				tryrecompress_trailing(ctx, h, ctx->bcjdata + ctx->head,
++						&e->length, dst, &compressedsize);
++			}
++			else{
++				tryrecompress_trailing(ctx, h, ctx->queue + ctx->head,
++						&e->length, dst, &compressedsize);
++			}
++		}
+ 
+ 		e->compressedblks = BLK_ROUND_UP(sbi, compressedsize);
+ 		DBG_BUGON(e->compressedblks * blksz >= e->length);
+@@ -691,7 +722,7 @@ static int z_erofs_compress_one(struct z_erofs_compress_sctx *ctx)
+ 
+ 	while (len) {
+ 		int ret = z_erofs_compress_dedupe(ctx, &len);
+-
++		
+ 		if (ret > 0)
+ 			break;
+ 		else if (ret < 0)
+@@ -1008,15 +1039,26 @@ int z_erofs_compress_segment(struct z_erofs_compress_sctx *ctx,
+ 	int fd = ictx->fd;
+ 
+ 	ctx->blkaddr = blkaddr;
++	ctx->filepos  = 0;
+ 	while (ctx->remaining) {
+ 		const u64 rx = min_t(u64, ctx->remaining,
+ 				     Z_EROFS_COMPR_QUEUE_SZ - ctx->tail);
+ 		int ret;
+-
+ 		ret = (offset == -1 ?
+ 			read(fd, ctx->queue + ctx->tail, rx) :
+ 			pread(fd, ctx->queue + ctx->tail, rx,
+-			      ictx->fpos + offset));
++				ictx->fpos + offset));
++
++		if(cfg.c_bcj_flag){
++			ctx->bcjdata = (u8 *)malloc(rx + ctx->tail);
++			if (ctx->bcjdata == NULL) {
++        		erofs_err("bcjread malloc failed");
++        		return -errno;
++    		}
++			memcpy(ctx->bcjdata,ctx->queue,rx + ctx->tail);
++			bcj_code((uint8_t *)ctx->bcjdata,ctx->filepos,(size_t)(rx + ctx->tail),cfg.c_bcj_flag,true);
++		}
++
+ 		if (ret != rx)
+ 			return -errno;
+ 
+@@ -1024,8 +1066,12 @@ int z_erofs_compress_segment(struct z_erofs_compress_sctx *ctx,
+ 		ctx->tail += rx;
+ 		if (offset != -1)
+ 			offset += rx;
+-
++		
+ 		ret = z_erofs_compress_one(ctx);
++		if(cfg.c_bcj_flag){
++			free(ctx->bcjdata);
++			ctx->bcjdata = NULL;
++		}
+ 		if (ret)
+ 			return ret;
+ 	}
+diff --git a/lib/data.c b/lib/data.c
+index f37f8f0..b344193 100644
+--- a/lib/data.c
++++ b/lib/data.c
+@@ -238,7 +238,7 @@ int z_erofs_read_one_data(struct erofs_inode *inode,
+ 	struct erofs_sb_info *sbi = inode->sbi;
+ 	struct erofs_map_dev mdev;
+ 	int ret = 0;
+-
++	
+ 	if (map->m_flags & EROFS_MAP_FRAGMENT) {
+ 		struct erofs_inode packed_inode = {
+ 			.sbi = sbi,
+diff --git a/lib/decompress.c b/lib/decompress.c
+index 3f553a8..369ac4c 100644
+--- a/lib/decompress.c
++++ b/lib/decompress.c
+@@ -507,7 +507,7 @@ out:
+ int z_erofs_decompress(struct z_erofs_decompress_req *rq)
+ {
+ 	struct erofs_sb_info *sbi = rq->sbi;
+-
++	
+ 	if (rq->alg == Z_EROFS_COMPRESSION_INTERLACED) {
+ 		unsigned int count, rightpart, skip;
+ 
+diff --git a/lib/super.c b/lib/super.c
+index 32e10cd..531a039 100644
+--- a/lib/super.c
++++ b/lib/super.c
+@@ -123,6 +123,7 @@ int erofs_read_superblock(struct erofs_sb_info *sbi)
+ 
+ 	sbi->build_time = le64_to_cpu(dsb->build_time);
+ 	sbi->build_time_nsec = le32_to_cpu(dsb->build_time_nsec);
++	sbi->bcj_flag = dsb->bcj_flag;
+ 
+ 	memcpy(&sbi->uuid, dsb->uuid, sizeof(dsb->uuid));
+ 
+@@ -175,6 +176,7 @@ int erofs_writesb(struct erofs_sb_info *sbi, struct erofs_buffer_head *sb_bh,
+ 		.extra_devices = cpu_to_le16(sbi->extra_devices),
+ 		.devt_slotoff = cpu_to_le16(sbi->devt_slotoff),
+ 		.packed_nid = cpu_to_le64(sbi->packed_nid),
++		.bcj_flag = sbi->bcj_flag,
+ 	};
+ 	const u32 sb_blksize = round_up(EROFS_SUPER_END, erofs_blksiz(sbi));
+ 	char *buf;
+diff --git a/mkfs/Makefile.am b/mkfs/Makefile.am
+index 6354712..40599d6 100644
+--- a/mkfs/Makefile.am
++++ b/mkfs/Makefile.am
+@@ -4,7 +4,7 @@ AUTOMAKE_OPTIONS = foreign
+ bin_PROGRAMS     = mkfs.erofs
+ AM_CPPFLAGS = ${libselinux_CFLAGS}
+ mkfs_erofs_SOURCES = main.c
+-mkfs_erofs_CFLAGS = -Wall -I$(top_srcdir)/include
++mkfs_erofs_CFLAGS = -Wall -I$(top_srcdir)/include ${liblzma_CFLAGS}
+ mkfs_erofs_LDADD = $(top_builddir)/lib/liberofs.la ${libselinux_LIBS} \
+ 	${libuuid_LIBS} ${liblz4_LIBS} ${liblzma_LIBS} ${zlib_LIBS} \
+ 	${libdeflate_LIBS} ${libzstd_LIBS} ${libqpl_LIBS}
+diff --git a/mkfs/main.c b/mkfs/main.c
+index b7129eb..567fee6 100644
+--- a/mkfs/main.c
++++ b/mkfs/main.c
+@@ -84,6 +84,9 @@ static struct option long_options[] = {
+ 	{"root-xattr-isize", required_argument, NULL, 524},
+ 	{"mkfs-time", no_argument, NULL, 525},
+ 	{"all-time", no_argument, NULL, 526},
++#ifndef __EROFS_BCJ_H
++	{"bcj",required_argument, NULL, 527},
++#endif
+ 	{0, 0, 0, 0},
+ };
+ 
+@@ -211,6 +214,10 @@ static void usage(int argc, char **argv)
+ #endif
+ #ifdef EROFS_MT_ENABLED
+ 		, erofs_get_available_processors() /* --workers= */
++#endif
++#ifndef __EROFS_BCJ_H
++		" --bcj=                X=bcj filter for different architectures\n"
++		"                       (X=x86|arm|arm64)\n"
+ #endif
+ 	);
+ }
+@@ -840,6 +847,18 @@ static int mkfs_parse_options_cfg(int argc, char *argv[])
+ 		case 526:
+ 			cfg.c_timeinherit = TIMESTAMP_FIXED;
+ 			break;
++		case 527:
++			if(!strcmp(optarg, "x86"))
++				cfg.c_bcj_flag = 1;
++			else if (!strcmp(optarg, "arm"))
++				cfg.c_bcj_flag = 2;
++			else if (!strcmp(optarg, "arm64"))
++				cfg.c_bcj_flag = 3;
++			else{
++				cfg.c_bcj_flag = 0;
++				erofs_err("invalid bcj filter %s", optarg);
++			}
++			break;
+ 		case 'V':
+ 			version();
+ 			exit(0);
+@@ -1017,6 +1036,7 @@ static void erofs_mkfs_default_options(void)
+ 	g_sbi.feature_incompat = EROFS_FEATURE_INCOMPAT_ZERO_PADDING;
+ 	g_sbi.feature_compat = EROFS_FEATURE_COMPAT_SB_CHKSUM |
+ 			     EROFS_FEATURE_COMPAT_MTIME;
++	cfg.c_bcj_flag = 0;
+ }
+ 
+ /* https://reproducible-builds.org/specs/source-date-epoch/ for more details */
+@@ -1186,6 +1206,7 @@ int main(int argc, char **argv)
+ 		g_sbi.build_time      = t.tv_sec;
+ 		g_sbi.build_time_nsec = t.tv_usec;
+ 	}
++	g_sbi.bcj_flag = cfg.c_bcj_flag;
+ 
+ 	err = erofs_dev_open(&g_sbi, cfg.c_img_path, O_RDWR |
+ 				(incremental_mode ? 0 : O_TRUNC));
+-- 
+2.45.2.windows.1
+

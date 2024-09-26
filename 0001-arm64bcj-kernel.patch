@@ -1,25 +1,25 @@
-From 088a9a15eadd1d78293aaa8514361122c81c2050 Mon Sep 17 00:00:00 2001
+From 644a39ca5b107e98ef3bbac8f70e2b6a9950a42b Mon Sep 17 00:00:00 2001
 From: MercyHeart <mikukon1@outlook.com>
-Date: Thu, 26 Sep 2024 02:00:50 +0200
-Subject: [PATCH] arm64bcj
+Date: Thu, 26 Sep 2024 16:20:58 +0200
+Subject: [PATCH] arm64bcj kernel
 
 ---
- fs/erofs/Makefile   |   4 +-
+ fs/erofs/Makefile   |   2 +-
  fs/erofs/bcj.c      | 244 ++++++++++++++++++++++++++++++++++++++++++++
  fs/erofs/bcj.h      |  25 +++++
  fs/erofs/erofs_fs.h |   3 +-
  fs/erofs/internal.h |   1 +
- fs/erofs/super.c    |   3 +-
- fs/erofs/zdata.c    |  31 ++++++
- 7 files changed, 307 insertions(+), 4 deletions(-)
+ fs/erofs/super.c    |   1 +
+ fs/erofs/zdata.c    |  39 +++++++
+ 7 files changed, 313 insertions(+), 2 deletions(-)
  create mode 100644 fs/erofs/bcj.c
  create mode 100644 fs/erofs/bcj.h
 
 diff --git a/fs/erofs/Makefile b/fs/erofs/Makefile
-index 097d672e6..a2e716346 100644
+index 097d672e6..dad94238f 100644
 --- a/fs/erofs/Makefile
 +++ b/fs/erofs/Makefile
-@@ -1,10 +1,10 @@
+@@ -1,7 +1,7 @@
  # SPDX-License-Identifier: GPL-2.0-only
  
  obj-$(CONFIG_EROFS_FS) += erofs.o
@@ -28,11 +28,6 @@ index 097d672e6..a2e716346 100644
  erofs-$(CONFIG_EROFS_FS_XATTR) += xattr.o
  erofs-$(CONFIG_EROFS_FS_ZIP) += decompressor.o zmap.o zdata.o zutil.o
  erofs-$(CONFIG_EROFS_FS_ZIP_LZMA) += decompressor_lzma.o
- erofs-$(CONFIG_EROFS_FS_ZIP_DEFLATE) += decompressor_deflate.o
- erofs-$(CONFIG_EROFS_FS_ZIP_ZSTD) += decompressor_zstd.o
--erofs-$(CONFIG_EROFS_FS_ONDEMAND) += fscache.o
-+erofs-$(CONFIG_EROFS_FS_ONDEMAND) += fscache.o
-\ No newline at end of file
 diff --git a/fs/erofs/bcj.c b/fs/erofs/bcj.c
 new file mode 100644
 index 000000000..70a9263ac
@@ -331,7 +326,7 @@ index 6c0c270c4..31c1289d1 100644
  
  /*
 diff --git a/fs/erofs/internal.h b/fs/erofs/internal.h
-index 0c1b44ac9..d3e311a32 100644
+index 45dc15ebd..7988cf347 100644
 --- a/fs/erofs/internal.h
 +++ b/fs/erofs/internal.h
 @@ -164,6 +164,7 @@ struct erofs_sb_info {
@@ -343,25 +338,31 @@ index 0c1b44ac9..d3e311a32 100644
  	/* sysfs support */
  	struct kobject s_kobj;		/* /sys/fs/erofs/<devname> */
 diff --git a/fs/erofs/super.c b/fs/erofs/super.c
-index 1b91d9513..6d9d0cbf9 100644
+index 6cb5c8916..d0990e294 100644
 --- a/fs/erofs/super.c
 +++ b/fs/erofs/super.c
-@@ -342,8 +342,9 @@ static int erofs_read_superblock(struct super_block *sb)
+@@ -328,6 +328,7 @@ static int erofs_read_superblock(struct super_block *sb)
  
  	sbi->build_time = le64_to_cpu(dsb->build_time);
  	sbi->build_time_nsec = le32_to_cpu(dsb->build_time_nsec);
 +	sbi->bcj_flag = dsb->bcj_flag;
  
--	super_set_uuid(sb, (void *)dsb->uuid, sizeof(dsb->uuid));
-+	memcpy(&sb->s_uuid, dsb->uuid, sizeof(dsb->uuid));
+ 	super_set_uuid(sb, (void *)dsb->uuid, sizeof(dsb->uuid));
  
- 	ret = strscpy(sbi->volume_name, dsb->volume_name,
- 		      sizeof(dsb->volume_name));
 diff --git a/fs/erofs/zdata.c b/fs/erofs/zdata.c
-index 017b5456b..9688aa43c 100644
+index 424f656cd..abfdc5bc2 100644
 --- a/fs/erofs/zdata.c
 +++ b/fs/erofs/zdata.c
-@@ -90,6 +90,9 @@ struct z_erofs_pcluster {
+@@ -9,6 +9,8 @@
+ #include <linux/cpuhotplug.h>
+ #include <trace/events/erofs.h>
+ 
++#include "bcj.h"
++
+ #define Z_EROFS_PCLUSTER_MAX_PAGES	(Z_EROFS_PCLUSTER_MAX_SIZE / PAGE_SIZE)
+ #define Z_EROFS_INLINE_BVECS		2
+ 
+@@ -85,6 +87,9 @@ struct z_erofs_pcluster {
  	/* L: whether extra buffer allocations are best-effort */
  	bool besteffort;
  
@@ -371,7 +372,7 @@ index 017b5456b..9688aa43c 100644
  	/* A: compressed bvecs (can be cached or inplaced pages) */
  	struct z_erofs_bvec compressed_bvecs[];
  };
-@@ -791,6 +794,7 @@ static int z_erofs_register_pcluster(struct z_erofs_decompress_frontend *fe)
+@@ -792,6 +797,7 @@ static int z_erofs_register_pcluster(struct z_erofs_decompress_frontend *fe)
  	/* new pclusters should be claimed as type 1, primary and followed */
  	pcl->next = fe->owned_head;
  	pcl->pageofs_out = map->m_la & ~PAGE_MASK;
@@ -379,39 +380,52 @@ index 017b5456b..9688aa43c 100644
  	fe->mode = Z_EROFS_PCLUSTER_FOLLOWED;
  
  	/*
-@@ -1305,6 +1309,33 @@ static int z_erofs_decompress_pcluster(struct z_erofs_decompress_backend *be,
+@@ -1213,6 +1219,35 @@ static int z_erofs_parse_in_bvecs(struct z_erofs_decompress_backend *be,
+ 	return err;
+ }
+ 
++static int z_erofs_bcj_decode_page(struct page* page,struct z_erofs_pcluster* pcl,u8 bcj_flag,int nowpage,int totalpage)
++{
++	if(pcl->pclustersize != pcl->length){
++		uint8_t* buf = (uint8_t *)kmap_local_page(page);
++		if(!buf){
++			printk(KERN_DEBUG "read page failed\n");
++			return -1;
++		}else{
++			uint32_t startpos;
++			if(nowpage == 0){
++				startpos = pcl->filepos;
++				bcj_code(buf + pcl->pageofs_out,startpos,PAGE_SIZE - pcl->pageofs_out,bcj_flag,false);
++			}else if(nowpage == totalpage - 1){
++				startpos = pcl->filepos + nowpage*PAGE_SIZE - pcl->pageofs_out;
++				if((pcl->pageofs_out + pcl->length)%PAGE_SIZE == 0){
++					bcj_code(buf,startpos,PAGE_SIZE,bcj_flag,false);
++				}else{
++					bcj_code(buf,startpos,(pcl->pageofs_out + pcl->length)%PAGE_SIZE,bcj_flag,false);
++				}
++			}else{
++				startpos = pcl->filepos + nowpage*PAGE_SIZE - pcl->pageofs_out;
++				bcj_code(buf,startpos,PAGE_SIZE,bcj_flag,false);
++			}
++			kunmap_local(buf);
++		}
++	}
++	return 0;
++}
++
+ static int z_erofs_decompress_pcluster(struct z_erofs_decompress_backend *be,
+ 				       int err)
+ {
+@@ -1301,6 +1336,10 @@ static int z_erofs_decompress_pcluster(struct z_erofs_decompress_backend *be,
+ 			continue;
  
  		DBG_BUGON(z_erofs_page_is_invalidated(page));
- 
-+		//bcj test
-+		if(sbi->bcj_flag){
-+			if(pcl->pclustersize != pcl->length){
-+				uint8_t* buf = (uint8_t *)kmap_local_page(page);
-+				if(!buf){
-+					printk(KERN_DEBUG "read page failed\n");
-+				}else{
-+					uint32_t startpos;
-+					if(i == 0){
-+						startpos = pcl->filepos;
-+						bcj_code(buf + pcl->pageofs_out,startpos,PAGE_SIZE - pcl->pageofs_out,sbi->bcj_flag,false);
-+					}else if(i == be->nr_pages - 1){
-+						startpos = pcl->filepos + i*PAGE_SIZE - pcl->pageofs_out;
-+						if((pcl->pageofs_out + pcl->length)%PAGE_SIZE == 0){
-+							bcj_code(buf,startpos,PAGE_SIZE,sbi->bcj_flag,false);
-+						}else{
-+							bcj_code(buf,startpos,(pcl->pageofs_out + pcl->length)%PAGE_SIZE,sbi->bcj_flag,false);
-+						}
-+					}else{
-+						startpos = pcl->filepos + i*PAGE_SIZE - pcl->pageofs_out;
-+						bcj_code(buf,startpos,PAGE_SIZE,sbi->bcj_flag,false);
-+					}
-+					kunmap_local(buf);
-+				}
-+			}
-+		}
 +
- 		/* recycle all individual short-lived pages */
- 		if (z_erofs_put_shortlivedpage(be->pagepool, page))
++		if(sbi->bcj_flag)
++			z_erofs_bcj_decode_page(page,pcl,sbi->bcj_flag,i,be->nr_pages);
++
+ 		if (!z_erofs_is_shortlived_page(page)) {
+ 			z_erofs_onlinefolio_end(page_folio(page), err);
  			continue;
 -- 
 2.45.2.windows.1
