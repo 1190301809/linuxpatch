@@ -3,8 +3,6 @@ From: MercyHeart <2384268568@qq.com>
 Date: Thu, 26 Sep 2024 23:25:09 +0200
 Subject: [PATCH] arm64bcj kernel
 
-This patch adds support for BCJ decompression with the arm64 bcj.
-
 ---
  fs/erofs/Makefile   |   2 +-
  fs/erofs/bcj.c      | 255 ++++++++++++++++++++++++++++++++++++++++++++
@@ -17,7 +15,6 @@ This patch adds support for BCJ decompression with the arm64 bcj.
  create mode 100644 fs/erofs/bcj.c
  create mode 100644 fs/erofs/bcj.h
 
-Signed-off-by: MercyHeart <2384268568@qq.com>
 diff --git a/fs/erofs/Makefile b/fs/erofs/Makefile
 index 097d672e6..dad94238f 100644
 --- a/fs/erofs/Makefile
@@ -27,9 +24,9 @@ index 097d672e6..dad94238f 100644
  
  obj-$(CONFIG_EROFS_FS) += erofs.o
 -erofs-objs := super.o inode.o data.o namei.o dir.o utils.o sysfs.o
-+erofs-objs := super.o inode.o data.o namei.o dir.o sysfs.o sysfs.o bcj.o
++erofs-objs := super.o inode.o data.o namei.o dir.o utils.o sysfs.o bcj.o
  erofs-$(CONFIG_EROFS_FS_XATTR) += xattr.o
- erofs-$(CONFIG_EROFS_FS_ZIP) += decompressor.o zmap.o zdata.o pcpubuf.o
+ erofs-$(CONFIG_EROFS_FS_ZIP) += decompressor.o zmap.o zdata.o zutil.o
  erofs-$(CONFIG_EROFS_FS_ZIP_LZMA) += decompressor_lzma.o
 diff --git a/fs/erofs/bcj.c b/fs/erofs/bcj.c
 new file mode 100644
@@ -374,9 +371,9 @@ index 424f656cd..df353a5e3 100644
  #define Z_EROFS_PCLUSTER_MAX_PAGES	(Z_EROFS_PCLUSTER_MAX_SIZE / PAGE_SIZE)
  #define Z_EROFS_INLINE_BVECS		2
  
-@@ -87,6 +89,9 @@ struct z_erofs_pcluster {
- 	/* L: indicate several pageofs_outs or not */
-	bool multibases;
+@@ -85,6 +87,9 @@ struct z_erofs_pcluster {
+ 	/* L: whether extra buffer allocations are best-effort */
+ 	bool besteffort;
  
 +	/* L: bcj test data*/
 +	uint32_t  filepos;
@@ -392,8 +389,8 @@ index 424f656cd..df353a5e3 100644
  	fe->mode = Z_EROFS_PCLUSTER_FOLLOWED;
  
  	/*
-@@ -1236,6 +1242,37 @@ static int z_erofs_parse_in_bvecs(struct z_erofs_decompress_backend *be,
- 	return 0;
+@@ -1213,6 +1219,37 @@ static int z_erofs_parse_in_bvecs(struct z_erofs_decompress_backend *be,
+ 	return err;
  }
  
 +static int z_erofs_bcj_decode_page(struct page *page, struct z_erofs_pcluster *pcl,
@@ -430,16 +427,17 @@ index 424f656cd..df353a5e3 100644
  static int z_erofs_decompress_pcluster(struct z_erofs_decompress_backend *be,
  				       int err)
  {
-@@ -1329,6 +1366,9 @@ static int z_erofs_decompress_pcluster(struct z_erofs_decompress_backend *be,
+@@ -1301,6 +1338,10 @@ static int z_erofs_decompress_pcluster(struct z_erofs_decompress_backend *be,
  			continue;
  
  		DBG_BUGON(z_erofs_page_is_invalidated(page));
 +
 +		if (sbi->bcj_flag)
 +			z_erofs_bcj_decode_page(page, pcl, sbi->bcj_flag, i, be->nr_pages);
-
- 		/* recycle all individual short-lived pages */
-		if (z_erofs_put_shortlivedpage(be->pagepool, page))
++
+ 		if (!z_erofs_is_shortlived_page(page)) {
+ 			z_erofs_onlinefolio_end(page_folio(page), err);
+ 			continue;
 -- 
 2.45.2.windows.1
 
