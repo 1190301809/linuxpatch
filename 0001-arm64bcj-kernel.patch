@@ -427,17 +427,16 @@ index 424f656cd..df353a5e3 100644
  static int z_erofs_decompress_pcluster(struct z_erofs_decompress_backend *be,
  				       int err)
  {
-@@ -1301,6 +1338,10 @@ static int z_erofs_decompress_pcluster(struct z_erofs_decompress_backend *be,
+@@ -1329,6 +1366,9 @@ static int z_erofs_decompress_pcluster(struct z_erofs_decompress_backend *be,
  			continue;
  
  		DBG_BUGON(z_erofs_page_is_invalidated(page));
 +
 +		if (sbi->bcj_flag)
 +			z_erofs_bcj_decode_page(page, pcl, sbi->bcj_flag, i, be->nr_pages);
-+
- 		if (!z_erofs_is_shortlived_page(page)) {
- 			z_erofs_onlinefolio_end(page_folio(page), err);
- 			continue;
+ 
+ 		/* recycle all individual short-lived pages */
+ 		if (z_erofs_put_shortlivedpage(be->pagepool, page));
 -- 
 2.45.2.windows.1
 
