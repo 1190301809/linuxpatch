@@ -26,10 +26,10 @@ index 097d672e6..dad94238f 100644
  # SPDX-License-Identifier: GPL-2.0-only
  
  obj-$(CONFIG_EROFS_FS) += erofs.o
--erofs-objs := super.o inode.o data.o namei.o dir.o sysfs.o
-+erofs-objs := super.o inode.o data.o namei.o dir.o sysfs.o bcj.o
+-erofs-objs := super.o inode.o data.o namei.o dir.o utils.o sysfs.o
++erofs-objs := super.o inode.o data.o namei.o dir.o sysfs.o sysfs.o bcj.o
  erofs-$(CONFIG_EROFS_FS_XATTR) += xattr.o
- erofs-$(CONFIG_EROFS_FS_ZIP) += decompressor.o zmap.o zdata.o zutil.o
+ erofs-$(CONFIG_EROFS_FS_ZIP) += decompressor.o zmap.o zdata.o pcpubuf.o
  erofs-$(CONFIG_EROFS_FS_ZIP_LZMA) += decompressor_lzma.o
 diff --git a/fs/erofs/bcj.c b/fs/erofs/bcj.c
 new file mode 100644
@@ -353,13 +353,13 @@ diff --git a/fs/erofs/super.c b/fs/erofs/super.c
 index 6cb5c8916..d0990e294 100644
 --- a/fs/erofs/super.c
 +++ b/fs/erofs/super.c
-@@ -328,6 +328,7 @@ static int erofs_read_superblock(struct super_block *sb)
+@@ -341,6 +341,7 @@ static int erofs_read_superblock(struct super_block *sb)
  
  	sbi->build_time = le64_to_cpu(dsb->build_time);
  	sbi->build_time_nsec = le32_to_cpu(dsb->build_time_nsec);
 +	sbi->bcj_flag = dsb->bcj_flag;
  
- 	super_set_uuid(sb, (void *)dsb->uuid, sizeof(dsb->uuid));
+ 	memcpy(&sb->s_uuid, dsb->uuid, sizeof(dsb->uuid));
  
 diff --git a/fs/erofs/zdata.c b/fs/erofs/zdata.c
 index 424f656cd..df353a5e3 100644
@@ -374,9 +374,9 @@ index 424f656cd..df353a5e3 100644
  #define Z_EROFS_PCLUSTER_MAX_PAGES	(Z_EROFS_PCLUSTER_MAX_SIZE / PAGE_SIZE)
  #define Z_EROFS_INLINE_BVECS		2
  
-@@ -85,6 +87,9 @@ struct z_erofs_pcluster {
- 	/* L: whether extra buffer allocations are best-effort */
- 	bool besteffort;
+@@ -87,6 +89,9 @@ struct z_erofs_pcluster {
+ 	/* L: indicate several pageofs_outs or not */
+	bool multibases;
  
 +	/* L: bcj test data*/
 +	uint32_t  filepos;
@@ -392,7 +392,7 @@ index 424f656cd..df353a5e3 100644
  	fe->mode = Z_EROFS_PCLUSTER_FOLLOWED;
  
  	/*
-@@ -1213,6 +1219,37 @@ static int z_erofs_parse_in_bvecs(struct z_erofs_decompress_backend *be,
+@@ -1236,6 +1242,37 @@ static int z_erofs_parse_in_bvecs(struct z_erofs_decompress_backend *be,
  	return err;
  }
  
@@ -430,17 +430,16 @@ index 424f656cd..df353a5e3 100644
  static int z_erofs_decompress_pcluster(struct z_erofs_decompress_backend *be,
  				       int err)
  {
-@@ -1301,6 +1338,10 @@ static int z_erofs_decompress_pcluster(struct z_erofs_decompress_backend *be,
+@@ -1329,6 +1366,9 @@ static int z_erofs_decompress_pcluster(struct z_erofs_decompress_backend *be,
  			continue;
  
  		DBG_BUGON(z_erofs_page_is_invalidated(page));
 +
 +		if (sbi->bcj_flag)
 +			z_erofs_bcj_decode_page(page, pcl, sbi->bcj_flag, i, be->nr_pages);
-+
- 		if (!z_erofs_is_shortlived_page(page)) {
- 			z_erofs_onlinefolio_end(page_folio(page), err);
- 			continue;
+
+ 		/* recycle all individual short-lived pages */
+		if (z_erofs_put_shortlivedpage(be->pagepool, page))
 -- 
 2.45.2.windows.1
 
