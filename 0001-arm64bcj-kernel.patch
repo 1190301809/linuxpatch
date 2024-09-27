@@ -393,7 +393,7 @@ index 424f656cd..df353a5e3 100644
  
  	/*
 @@ -1236,6 +1242,37 @@ static int z_erofs_parse_in_bvecs(struct z_erofs_decompress_backend *be,
- 	return err;
+ 	return 0;
  }
  
 +static int z_erofs_bcj_decode_page(struct page *page, struct z_erofs_pcluster *pcl,
