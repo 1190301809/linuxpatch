@@ -436,7 +436,7 @@ index 424f656cd..df353a5e3 100644
 +			z_erofs_bcj_decode_page(page, pcl, sbi->bcj_flag, i, be->nr_pages);
  
  		/* recycle all individual short-lived pages */
- 		if (z_erofs_put_shortlivedpage(be->pagepool, page));
+ 		if (z_erofs_put_shortlivedpage(be->pagepool, page))
 -- 
 2.45.2.windows.1
 
